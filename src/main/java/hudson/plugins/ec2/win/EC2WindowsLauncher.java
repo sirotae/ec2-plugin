@@ -5,8 +5,6 @@ import hudson.model.TaskListener;
 import hudson.plugins.ec2.EC2Computer;
 import hudson.plugins.ec2.EC2ComputerLauncher;
 import hudson.plugins.ec2.win.winrm.WindowsProcess;
-import hudson.remoting.Channel;
-import hudson.remoting.Channel.Listener;
 import hudson.slaves.ComputerLauncher;
 
 import java.io.IOException;
@@ -22,7 +20,7 @@ import com.amazonaws.AmazonClientException;
 import com.amazonaws.services.ec2.model.Instance;
 
 public class EC2WindowsLauncher extends EC2ComputerLauncher {
-    private static final String SLAVE_JAR = "slave.jar";
+    private static final String SLAVE_JAR = "slave.jar";   
     
     final long sleepBetweenAttemps = TimeUnit.SECONDS.toMillis(10);
 
@@ -41,45 +39,53 @@ public class EC2WindowsLauncher extends EC2ComputerLauncher {
             connection.execute("if not exist " + tmpDir + " mkdir " + tmpDir);
 
             if (initScript != null && initScript.trim().length() > 0 && !connection.exists(tmpDir + ".jenkins-init")) {
-                logger.println("Executing init script");
-                OutputStream init = connection.putFile(tmpDir + "init.bat");
-                init.write(initScript.getBytes("utf-8"));
-
-                WindowsProcess initProcess = connection.execute("cmd /c " + tmpDir + "init.bat");
-                IOUtils.copy(initProcess.getStdout(), logger);
-
-                int exitStatus = initProcess.waitFor();
-                if (exitStatus != 0) {
-                    logger.println("init script failed: exit code=" + exitStatus);
-                    return;
-                }
-
-                OutputStream initGuard = connection.putFile(tmpDir + ".jenkins-init");
-                initGuard.write("init ran".getBytes(StandardCharsets.UTF_8));
+                logger.println("Executing init script");   
+                writeFile(connection, tmpDir + "init.bat", initScript.getBytes("utf-8"));   
+                
+                executeAndWaitTermination (connection, "cmd /c " + tmpDir + "init.bat", logger, "init script failed");
+                writeFile(connection, tmpDir + ".jenkins-init", "init ran".getBytes(StandardCharsets.UTF_8));
+                
                 logger.println("init script ran successfully");
             }
 
-            OutputStream slaveJar = connection.putFile(tmpDir + SLAVE_JAR);
-            slaveJar.write(Jenkins.getInstance().getJnlpJars(SLAVE_JAR).readFully());
+            writeFile(connection, tmpDir + SLAVE_JAR, Jenkins.getInstance().getJnlpJars(SLAVE_JAR).readFully());
+            logger.println("slave.jar sent remotely");
+            
+            String jnlpUrl = "\""+Jenkins.getInstance().getRootUrl()+computer.getUrl()+"slave-agent.jnlp\"";
+            String slaveLaunchScript = "java -jar " + tmpDir + "slave.jar -jnlpUrl "+jnlpUrl + " -secret " + computer.getJnlpMac();
+            
+            logger.println("Executing script for starting Jenkins jnlp slave: " + slaveLaunchScript);
+                        
+            final WindowsProcess jenkinsSlave = startExecuting(connection, slaveLaunchScript, logger, 86400);
 
-            logger.println("slave.jar sent remotely. Bootstrapping it");
-
-            final String jvmopts = computer.getNode().jvmopts;
-            final WindowsProcess process = connection.execute("java " + (jvmopts != null ? jvmopts : "") + " -jar "
-                    + tmpDir + SLAVE_JAR, 86400);
-            computer.setChannel(process.getStdout(), process.getStdin(), logger, new Listener() {
-                @Override
-                public void onClosed(Channel channel, IOException cause) {
-                    process.destroy();
-                    connection.close();
-                }
-            });
-        } catch (Throwable ioe) {
+            logger.println("script ran successfully.");
+            
+        } catch (IOException ioe) {
             logger.println("Ouch:");
             ioe.printStackTrace(logger);
         } finally {
             connection.close();
         }
+    }
+    
+    private void writeFile(WinConnection connection, String fullFileName, byte[] bytes) throws IOException {
+        OutputStream init = connection.putFile(fullFileName);
+        init.write(bytes);
+    }
+    
+    private void executeAndWaitTermination (WinConnection connection, String command, PrintStream logger, String exceptionMessage) throws IOException {
+        WindowsProcess initProcess = connection.execute(command);
+        IOUtils.copy(initProcess.getStdout(), logger);
+
+        int exitStatus = initProcess.waitFor();
+        if (exitStatus!=0)
+            throw new IOException (exceptionMessage + " exit code " + exitStatus);
+    }
+    
+    private WindowsProcess startExecuting (WinConnection connection, String command, PrintStream logger, int timeout) throws IOException {
+        WindowsProcess initProcess = connection.execute(command, timeout);
+        IOUtils.copy(initProcess.getStdout(), logger);
+        return initProcess;
     }
 
     private WinConnection connectToWinRM(EC2Computer computer, PrintStream logger) throws AmazonClientException,
