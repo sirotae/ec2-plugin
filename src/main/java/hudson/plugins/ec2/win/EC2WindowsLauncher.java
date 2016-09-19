@@ -49,21 +49,24 @@ public class EC2WindowsLauncher extends EC2ComputerLauncher {
             }
 
             writeFile(connection, tmpDir + SLAVE_JAR, Jenkins.getInstance().getJnlpJars(SLAVE_JAR).readFully());
-            logger.println("slave.jar sent remotely");
-            
-            String jnlpUrl = "\""+Jenkins.getInstance().getRootUrl()+computer.getUrl()+"slave-agent.jnlp\"";
-            String slaveLaunchBatch = tmpDir + "slave.bat";
-            String slaveLaunchUser = computer.getNode().remoteAdmin;
-            
-            writeFile(connection, slaveLaunchBatch, ("java -jar " + tmpDir + "slave.jar -jnlpUrl " + jnlpUrl + " -secret " + computer.getJnlpMac()).getBytes("utf-8"));
-            String slaveLaunchScript = "mofcomp C:\\Windows\\System32\\wbem\\SchedProv.mof\r\n"
-                    + "powershell -command \"$slaveAgentBatch = '" + slaveLaunchBatch + "'; $JobUser = '" + slaveLaunchUser + "'; $jobName = 'JenkinsDynamicAgent'; $pr = New-ScheduledTaskPrincipal -RunLevel Highest -Userid $jobUser -LogonType Interactive; $st = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromDays(99)) -RestartCount 99 -RestartInterval ([TimeSpan]::FromSeconds(60)) -StartWhenAvailable; $tr = New-ScheduledTaskTrigger -AtLogOn -User $jobUser; $a = New-ScheduledTaskAction -Execute $slaveAgentBatch; Register-ScheduledTask -TaskName $jobName -Action $a -Trigger $tr -Settings $st -Principal $pr -Force; Start-ScheduledTask -TaskName $jobName;\"\r\n";
-            
-            logger.println("Executing script for starting Jenkins jnlp slave: " + slaveLaunchScript);
-            
-            final WindowsProcess jenkinsSlave = startExecuting(connection, slaveLaunchScript, logger, 86400);
+            logger.println("slave.jar sent remotely");                
 
-            logger.println("script ran successfully.");
+            String slaveLaunchBatch = tmpDir + "slave.bat"; 
+            String slaveLaunchBatchScript = "java -jar " + tmpDir + "slave.jar"+
+                " -jnlpUrl " + BatUtils.escapePercent("\""+Jenkins.getInstance().getRootUrl()+computer.getUrl()+"slave-agent.jnlp\"") + 
+                " -secret " + computer.getJnlpMac();
+            String interactiveLaunchScript = "powershell -command \"$slaveAgentBatch = '" + slaveLaunchBatch + 
+                    "'; $JobUser = '" + computer.getNode().remoteAdmin + 
+                    "'; $jobName = 'JenkinsDynamicAgent'; $pr = New-ScheduledTaskPrincipal -RunLevel Highest -Userid $jobUser -LogonType Interactive; $st = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromDays(99)) -RestartCount 99 -RestartInterval ([TimeSpan]::FromSeconds(60)) -StartWhenAvailable; $tr = New-ScheduledTaskTrigger -AtLogOn -User $jobUser; $a = New-ScheduledTaskAction -Execute $slaveAgentBatch; Register-ScheduledTask -TaskName $jobName -Action $a -Trigger $tr -Settings $st -Principal $pr -Force; Start-ScheduledTask -TaskName $jobName;\"";
+            
+            logger.println("Jenkins jnlp slave batch: " + slaveLaunchBatchScript); 
+            logger.println("Executing script for starting jenkins batch in interactive session: " + interactiveLaunchScript); 
+ 
+            writeFile(connection, slaveLaunchBatch, slaveLaunchBatchScript.getBytes("utf-8"));
+            executeAndWaitTermination (connection, "mofcomp C:\\Windows\\System32\\wbem\\SchedProv.mof", logger, "mofcomp script failed");           
+            startExecuting(connection, interactiveLaunchScript, logger, 86400);
+
+            logger.println("scripts ran successfully.");
         } catch (IOException ioe) {
             logger.println("Ouch:");
             ioe.printStackTrace(logger);
